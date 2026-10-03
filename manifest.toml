@@ -1,0 +1,64 @@
+schema_version = 1
+plugin_name = "netprox"
+
+[image]
+reference = "localhost/autonomics/biotools-py@sha256:21e14c1582a9d4c261c0a23a11864293313ee2b49b9b7d85bcabc89210b48c7e"
+tag = "v1"
+upstream = "Guney & Barabasi 2016 network proximity (ncomms10331)"
+license = "MIT"
+
+# 说明：度数匹配背景下的网络邻近检验（方案 §18.2 网络药理学 + §17 网络病理学）。
+# 与 §17 的"模块/家族置换"共用同一实现：种子集对 (S,T) 的最短路径邻近 +
+# 度数匹配随机化 z/p。
+
+[[nodes]]
+kind = "network_proximity"
+desc = "Guney network proximity (closest/separation) with degree-matched randomization"
+doc = """
+输入：互作网络边表 TSV（input0：两列基因符号，无表头或有表头均可，
+第 3 列起忽略；边两端需同一命名空间）+ 种子集表 TSV（input1：set_id /
+role / gene 三列，role 取 S 或 T）。对每个 (S集合, T集合) 组合输出一行。
+输出：proximity.tsv —— set_s/set_t/measure/d_observed/d_rand_mean/
+d_rand_sd/z/p_lower/p_upper/n_s/n_t/n_in_component + netprox.log。
+measure：
+- closest —— Guney d_c(S,T)：对每个 s 取到 T 的最短距离，取均值；
+- separation —— d_AB - (d_AA + d_BB)/2（d_xx 为集合内 closest 距离）。
+规则来源：Guney 2016 + 方案 §17/§18.2——随机对照按度数分箱匹配
+（bin_width 度一箱，箱内无放回抽样），经验 P=(b+1)/(B+1)，双侧各报。
+n_random 起始 1000；家族临界值低于精度时按方案 §17 在执行前提高并锁死
+次数与种子，不在接近显著时追加。
+失败处理：set_id/role/gene 列缺失、某集合在图中无节点、无 S-T 组合 → 退出 2。
+解释边界：网络邻近是先验/机制相容证据，不是药效验证（§18.2）；
+度数匹配不足时报告不可估计，不降匹配条件（§17）。
+"""
+timeout_secs = 14400
+artifact_prefix = "/artifacts/network_proximity"
+
+[nodes.ports]
+inputs = [{ type = "file" }, { type = "file" }]
+outputs = [
+  { path = "proximity.tsv", format = "netprox_table" },
+  { path = "netprox.log", format = "netprox_log" },
+]
+
+[nodes.params]
+measure = { type = "string", default = "closest", doc = "closest | separation" }
+n_random = { type = "int", default = 1000, min = 100.0, doc = "degree-matched randomizations; p=(b+1)/(B+1)" }
+bin_width = { type = "int", default = 10, min = 1.0, doc = "degree bin width for matched sampling" }
+seed = { type = "int", default = 42, doc = "RNG seed" }
+
+[nodes.command]
+interpreter = "python3"
+script_file = "scripts/network_proximity.py"
+
+[nodes.command.env]
+NP_MEASURE = "{{ measure }}"
+NP_N_RANDOM = "{{ n_random }}"
+NP_BIN_WIDTH = "{{ bin_width }}"
+NP_SEED = "{{ seed }}"
+
+[nodes.resources]
+network = "isolated"
+cpus = 2
+memory = "4g"
+pull_policy = "never"
