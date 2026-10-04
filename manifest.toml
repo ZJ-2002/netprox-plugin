@@ -15,21 +15,31 @@ license = "MIT"
 kind = "network_proximity"
 desc = "Guney network proximity (closest/separation) with degree-matched randomization"
 doc = """
-输入：互作网络边表 TSV（input0：两列基因符号，无表头或有表头均可，
-第 3 列起忽略；边两端需同一命名空间）+ 种子集表 TSV（input1：set_id /
-role / gene 三列，role 取 S 或 T）。对每个 (S集合, T集合) 组合输出一行。
+输入：互作网络边表 TSV（input0：两列基因符号，第 3 列起忽略；边两端需
+同一命名空间）+ 种子集表 TSV（input1：set_id / role / gene 三列，role 取
+S 或 T）。对每个 (S集合, T集合) 组合输出一行。
+表头（v2，审计 F12）：边表首行自动嗅探——两端点列均非数字且不出现在
+其余行的端点集 → 视为表头丢弃（v1 的 header=None 会把 string_ppi 输出
+表头当成一条假边）；has_header 参数可显式覆盖。
 输出：proximity.tsv —— set_s/set_t/measure/d_observed/d_rand_mean/
-d_rand_sd/z/p_lower/p_upper/n_s/n_t/n_in_component + netprox.log。
+d_rand_sd/mc_se/z/p_lower/p_upper/n_s/n_t/n_random_used + netprox.log。
+n_random_used = 实际参与统计的随机化次数（欠匹配/不可估计的抽样如实
+扣减）；mc_se = d_rand_sd/sqrt(n_random_used)（MC 标准误）。v1 manifest
+声明的 n_in_component 与实际输出不符，已对齐为实际列。
 measure：
 - closest —— Guney d_c(S,T)：对每个 s 取到 T 的最短距离，取均值；
-- separation —— d_AB - (d_AA + d_BB)/2（d_xx 为集合内 closest 距离）。
+- separation —— d_AB - (d_AA + d_BB)/2（d_xx 为集合内 closest 距离，
+  排除自身）。某集合入网节点 <2 时集合内距离无定义 → 该行输出 NA
+  （不崩溃），log 记原因（v2 修正：v1 直接加法崩溃）。
 规则来源：Guney 2016 + 方案 §17/§18.2——随机对照按度数分箱匹配
 （bin_width 度一箱，箱内无放回抽样），经验 P=(b+1)/(B+1)，双侧各报。
-n_random 起始 1000；家族临界值低于精度时按方案 §17 在执行前提高并锁死
-次数与种子，不在接近显著时追加。
-失败处理：set_id/role/gene 列缺失、某集合在图中无节点、无 S-T 组合 → 退出 2。
+n_random 默认 10000（v2 起对齐方案起始值，v1 为 1000）；家族临界值低于
+精度时按方案 §17 在执行前提高并锁死次数与种子，不在接近显著时追加。
+失败处理：set_id/role/gene 列缺失、边表无有效行、某集合在图中无节点、
+无 S-T 组合 → 退出 2。
 解释边界：网络邻近是先验/机制相容证据，不是药效验证（§18.2）；
-度数匹配不足时报告不可估计，不降匹配条件（§17）。
+度数匹配不足时报告不可估计，不降匹配条件、不聚合相邻箱（§17）；
+表达/可检测性匹配不在本节点（plan_network_background 任务范围）。
 """
 timeout_secs = 14400
 artifact_prefix = "/artifacts/network_proximity"
@@ -43,9 +53,10 @@ outputs = [
 
 [nodes.params]
 measure = { type = "string", default = "closest", doc = "closest | separation" }
-n_random = { type = "int", default = 1000, min = 100.0, doc = "degree-matched randomizations; p=(b+1)/(B+1)" }
+n_random = { type = "int", default = 10000, min = 100.0, doc = "degree-matched randomizations; p=(b+1)/(B+1); default 10000 since v2 (was 1000)" }
 bin_width = { type = "int", default = 10, min = 1.0, doc = "degree bin width for matched sampling" }
 seed = { type = "int", default = 42, doc = "RNG seed" }
+has_header = { type = "string", default = "auto", doc = "edge table header: auto (sniff) | yes | no" }
 
 [nodes.command]
 interpreter = "python3"
@@ -56,6 +67,7 @@ NP_MEASURE = "{{ measure }}"
 NP_N_RANDOM = "{{ n_random }}"
 NP_BIN_WIDTH = "{{ bin_width }}"
 NP_SEED = "{{ seed }}"
+NP_HAS_HEADER = "{{ has_header }}"
 
 [nodes.resources]
 network = "isolated"
