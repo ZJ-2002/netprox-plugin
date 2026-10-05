@@ -6,17 +6,24 @@
 # bin_width 取整；箱内候选不足时记 undermatched 并如实输出（不降条件、
 # 不聚合相邻箱）。
 # v2 契约修正（审计 F12）：
-# - 表头：边表首行自动嗅探——两端点列均非数字且不出现在其余任何行的
-#   端点里 → 视为表头丢弃；has_header 参数（auto|yes|no，默认 auto）
-#   可显式覆盖。v1 的 header=None 会把 string_ppi 输出的表头当成一条
-#   假边（gene_a—gene_b）。
-# - separation 单元素集合：集合内距离（排除自身后）无定义 → 输出 NA 行
-#   （不再崩溃），log 记不可估计原因。
+# - 表头：has_header 参数（auto|yes|no，默认 auto）可显式覆盖。v1 的
+#   header=None 会把 string_ppi 输出的表头当成一条假边（gene_a—gene_b）。
 # - n_random 默认 1000 → 10000（对齐方案 §18.2 起始值；变更记录在 README）。
 # - 输出列契约：实际输出列与 manifest 声明对齐为 n_random_used（实际
 #   参与统计的随机次数），并新增 mc_se = d_rand_sd/sqrt(n_random_used)
-#   （MC 标准误）。v1 manifest 声明的 n_in_component 从未输出过。
-# 失败处理：列缺失/集合全在分量外/无组合 → 退出 2。
+#   （注意：这是随机距离均值的 MC 标准误，不是经验 P 的 MC 精度）。
+#   v1 manifest 声明的 n_in_component 从未输出过。
+# v3 契约修正（fix-review R05/R06，2026-10-05）：
+# - 表头嗅探不再用"非数字且不在其余行"启发式——它会把只出现一次的真边
+#   （如单边文件 "A\tB"）当表头删掉。auto 改为已知表头记号白名单：首行
+#   两端点均为白名单记号（大小写不敏感）才判表头；任意基因名不承诺可
+#   无歧义嗅探，非常规表头用 has_header=yes 显式声明。
+# - separation 对齐官方定义（emreg00/toolbox get_separation, jorg-closest）：
+#   d12 = 两个方向 nearest 距离均值的平均，separation = d12-(d_AA+d_BB)/2，
+#   对称。单基因集合的集合内距离按 toolbox 以 0 代入（不再输出 NA）。
+# - 失败保行：组合不可估计（集合经分量过滤后为空等）不再静默 skip 或
+#   整体退出 2，输出 NA 行并 log 记因；仅当不存在任何 (S,T) 组合才退出 2。
+# 失败处理：列缺失/无组合 → 退出 2。
 # 解释边界：邻近=先验相容证据，不是药效（§18.2）。
 import os
 import sys
@@ -44,14 +51,6 @@ def fail(message):
     sys.exit(2)
 
 
-def is_numeric(token):
-    try:
-        float(token)
-    except ValueError:
-        return False
-    return True
-
-
 def read_edge_rows(path):
     """读边表原始行：跳过 # 注释与空行，返回 (a, b) 端点对列表（第 3 列起忽略）。"""
     rows = []
@@ -73,16 +72,29 @@ def read_edge_rows(path):
     return rows
 
 
+# 已知表头记号（fix-review R05）：本生态边表表头的实际用词，**小写精确
+# 匹配**——大小写不敏感会把大写基因符号（如 GENE1/GENE2）误判成表头
+# （gene1/gene2 在白名单内）。生态内表头均为小写 snake_case；大写或
+# 非常规表头不承诺识别，需 has_header=yes 显式声明。单字母记号
+# （a/b/u/v）也故意不收——真实基因符号/别名存在单字母形式。
+HEADER_TOKENS = frozenset({
+    "source", "target", "src", "dst", "from", "to",
+    "node1", "node2", "gene1", "gene2", "gene_a", "gene_b",
+    "protein1", "protein2", "interactor_a", "interactor_b",
+    "partner1", "partner2", "id_a", "id_b", "symbol_a", "symbol_b",
+    "geneid1", "geneid2", "preferred_name_a", "preferred_name_b",
+})
+
+
 def looks_like_header(rows):
-    """首行两端点均非数字、且不出现在其余任何行的端点里 → 表头。"""
+    """首行两端点均为已知表头记号（小写精确匹配）→ 表头。
+
+    不嗅探任意基因名：旧启发式（非数字且不出现在其余行端点）会把只出现
+    一次的真边当表头删掉（单边文件 "A\tB" → 空图；两条不相连的符号边
+    → 删第一条）。白名单外的首行一律当数据行。
+    """
     first_a, first_b = rows[0]
-    rest_tokens = {token for row in rows[1:] for token in row}
-    return (
-        not is_numeric(first_a)
-        and not is_numeric(first_b)
-        and first_a not in rest_tokens
-        and first_b not in rest_tokens
-    )
+    return first_a in HEADER_TOKENS and first_b in HEADER_TOKENS
 
 
 def parse_edges(path, has_header="auto"):
@@ -126,17 +138,29 @@ def closest_distance(graph, from_set, to_set, exclude_self=False):
 
 
 def proximity(graph, measure, s_members, t_members):
-    """返回 (观测值, 不可估计原因)。原因 None = 正常估计。"""
+    """返回 (观测值, 不可估计原因)。原因 None = 正常估计。
+
+    closest 保持 Guney 的方向性定义（S 中每基因到 T 最近距离的均值，
+    S/T 互换会变——这是 closest 本身的性质，不是缺陷）。
+    separation 对齐 emreg00/toolbox get_separation（jorg-closest）：
+    d12 = (mean_{s∈S} min_{t∈T} d + mean_{t∈T} min_{s∈S} d) / 2，对称；
+    separation = d12 − (d_SS + d_TT)/2，d_XX 为集合内 nearest 距离均值
+    （排除自身）。单基因集合的 d_XX 按 toolbox 以 0 代入（values=[0]）。
+    """
     d_st = closest_distance(graph, s_members, t_members)
-    if d_st is None:
+    d_ts = closest_distance(graph, t_members, s_members)
+    if d_st is None or d_ts is None:
         return None, "unreachable"  # 两集合在最大分量内本应连通，防御分支
     if measure == "closest":
         return d_st, None
     d_ss = closest_distance(graph, s_members, s_members, exclude_self=True)
     d_tt = closest_distance(graph, t_members, t_members, exclude_self=True)
-    if d_ss is None or d_tt is None:
-        return None, "singleton"  # 某集合入网节点 <2，集合内距离无定义
-    return d_st - 0.5 * (d_ss + d_tt), None
+    if d_ss is None:
+        d_ss = 0.0  # 单基因集合：toolbox values=[0] 代入
+    if d_tt is None:
+        d_tt = 0.0
+    d12 = (d_st + d_ts) / 2.0
+    return d12 - 0.5 * (d_ss + d_tt), None
 
 
 def degree_bins(graph, bin_width):
@@ -195,10 +219,10 @@ def main():
         # 整图统计（含分量外节点/边）+ 最大分量大小——表头假边之类的图污染在
         # nodes/edges 里可见，component 行说明实际参与统计的子图。
         f"nodes={full_graph.number_of_nodes()}\tedges={full_graph.number_of_edges()}\tcomponent={len(component)}",
-        "header\tmode={}\tdropped={}  # auto sniff: 首行两端点均非数字且不在其余行端点集".format(
+        "header\tmode={}\tdropped={}  # auto sniff (v3): 首行两端点均为已知表头记号白名单成员才判表头；白名单外一律当数据行".format(
             header_mode, dropped_header
         ),
-        "params\tmeasure={}\tn_random={}\tbin_width={}\tseed={}  # n_random default 10000 since v2 (was 1000)".format(
+        "params\tmeasure={}\tn_random={}\tbin_width={}\tseed={}  # n_random default 10000 since v2 (was 1000); mc_se = MC SE of the null-mean distance, NOT of the empirical p".format(
             MEASURE, N_RANDOM, BIN_WIDTH, SEED
         ),
     ]
@@ -207,27 +231,31 @@ def main():
         return sorted(sets[key] & component)
 
     records = []
+    n_estimable = 0
+
+    def na_row(s_key, t_key, s_members, t_members, reason):
+        # 失败保行（fix-review R06）：不可估计的组合保留 NA 行（n_s/n_t 如实
+        # 报分量内入网数），log 记因；不再静默 skip。
+        nan = float("nan")
+        records.append((s_key[0], t_key[0], MEASURE, nan, nan, nan,
+                        nan, nan, nan, nan, len(s_members), len(t_members), nan))
+        log_lines.append(f"NA {s_key[0]} vs {t_key[0]}: {reason}")
+
     for s_key in s_keys:
         for t_key in t_keys:
             s_members = members_in_component(s_key)
             t_members = members_in_component(t_key)
             if not s_members or not t_members:
-                log_lines.append(f"skipped {s_key[0]} vs {t_key[0]}: empty after component filter")
+                na_row(s_key, t_key, s_members, t_members,
+                       "not estimable - a set is empty after largest-component filter "
+                       "(no member genes in the largest component)")
                 continue
             observed, reason = proximity(graph, MEASURE, s_members, t_members)
-            if observed is None and reason == "singleton":
-                # separation 的集合内距离无定义（某集合入网节点 <2）→ NA 行，不崩溃。
-                nan = float("nan")
-                records.append((s_key[0], t_key[0], MEASURE, nan, nan, nan,
-                                nan, nan, nan, nan, len(s_members), len(t_members), nan))
-                log_lines.append(
-                    f"NA {s_key[0]} vs {t_key[0]}: separation not estimable - "
-                    "a set has <2 genes in the largest component (within-set distance undefined)"
-                )
-                continue
             if observed is None:
-                log_lines.append(f"skipped {s_key[0]} vs {t_key[0]}: unreachable")
+                na_row(s_key, t_key, s_members, t_members,
+                       f"not estimable - {reason}")
                 continue
+            n_estimable += 1
             null = []
             undermatched_total = 0
             for _ in range(N_RANDOM):
@@ -241,7 +269,8 @@ def main():
                 log_lines.append(
                     f"WARN {s_key[0]} vs {t_key[0]}: degree bins undermatched "
                     f"{undermatched_total} times across {N_RANDOM} randomizations; "
-                    "random sets are smaller than requested - report as reduced precision (plan §17)"
+                    "random sets are smaller than requested - treat as a deviation from "
+                    "the frozen null model, not merely reduced precision (plan §17)"
                 )
             null_array = np.asarray(null, dtype=float)
             mean = float(null_array.mean())
@@ -258,12 +287,15 @@ def main():
                 f"done {s_key[0]} vs {t_key[0]}: z={z:.3f} p_lower={p_lower:.4f} B_used={n_used}"
             )
 
-    if not records:
-        fail("no (S,T) combination was estimable on the largest component")
-
+    # 失败保行（fix-review R06）：先写证据文件，再按可估性定退出码——全部
+    # 组合不可估计 → 仍退 2（节点失败信号，证据已落盘）；部分可估 → 退 0，
+    # NA 行随表保留。
     pd.DataFrame(records, columns=OUTPUT_COLUMNS).to_csv(out_tsv, sep="\t", index=False)
     with open(out_log, "w", encoding="utf-8") as handle:
         handle.write("\n".join(log_lines) + "\n")
+    if n_estimable == 0:
+        fail("no (S,T) combination was estimable on the largest component "
+             "(all rows NA; evidence written to outputs)")
 
 
 if __name__ == "__main__":

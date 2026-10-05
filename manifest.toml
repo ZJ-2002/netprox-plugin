@@ -18,25 +18,34 @@ doc = """
 输入：互作网络边表 TSV（input0：两列基因符号，第 3 列起忽略；边两端需
 同一命名空间）+ 种子集表 TSV（input1：set_id / role / gene 三列，role 取
 S 或 T）。对每个 (S集合, T集合) 组合输出一行。
-表头（v2，审计 F12）：边表首行自动嗅探——两端点列均非数字且不出现在
-其余行的端点集 → 视为表头丢弃（v1 的 header=None 会把 string_ppi 输出
-表头当成一条假边）；has_header 参数可显式覆盖。
+表头（v2 审计 F12 引入，v3 fix-review R05 改为白名单）：auto 模式下首行
+两端点均为已知表头记号（gene_a/gene_b/source/target 等，**小写精确
+匹配**——生态内表头均为小写 snake_case，大写基因符号如 GENE1 不得误判）
+才判表头丢弃；白名单外一律当数据行——任意基因名不承诺可无歧义嗅探
+（旧"非数字且不在其余行"启发式会把只出现一次的真边当表头删掉）。大写
+或非常规表头请用 has_header=yes 显式声明；no 时表头行按数据行处理。
 输出：proximity.tsv —— set_s/set_t/measure/d_observed/d_rand_mean/
 d_rand_sd/mc_se/z/p_lower/p_upper/n_s/n_t/n_random_used + netprox.log。
 n_random_used = 实际参与统计的随机化次数（欠匹配/不可估计的抽样如实
-扣减）；mc_se = d_rand_sd/sqrt(n_random_used)（MC 标准误）。v1 manifest
-声明的 n_in_component 与实际输出不符，已对齐为实际列。
+扣减）；mc_se = d_rand_sd/sqrt(n_random_used)——这是随机距离均值的 MC
+标准误，不是经验 P 的 MC 精度（v3 措辞对齐）。v1 manifest 声明的
+n_in_component 与实际输出不符，已对齐为实际列。
 measure：
-- closest —— Guney d_c(S,T)：对每个 s 取到 T 的最短距离，取均值；
-- separation —— d_AB - (d_AA + d_BB)/2（d_xx 为集合内 closest 距离，
-  排除自身）。某集合入网节点 <2 时集合内距离无定义 → 该行输出 NA
-  （不崩溃），log 记原因（v2 修正：v1 直接加法崩溃）。
+- closest —— Guney d_c(S,T)：对每个 s 取到 T 的最短距离，取均值
+  （方向性是 closest 的定义性质，S/T 互换会变）；
+- separation —— 对齐 emreg00/toolbox get_separation（jorg-closest）：
+  d12 = 两个方向 nearest 距离均值的平均，d_AB - (d_AA + d_BB)/2
+  （d_xx 为集合内 closest 距离，排除自身），对称；单基因集合的 d_xx
+  按 toolbox 以 0 代入（v3：v2 曾输出 NA，官方语义可估计）。
+  不可估计的组合（集合经最大分量过滤后为空等）保留 NA 行并 log 记因
+  （v3 失败保行：v2 曾静默跳过该组合）；全部组合均不可估计 → 仍退 2
+  （证据文件先写出）。
 规则来源：Guney 2016 + 方案 §17/§18.2——随机对照按度数分箱匹配
 （bin_width 度一箱，箱内无放回抽样），经验 P=(b+1)/(B+1)，双侧各报。
 n_random 默认 10000（v2 起对齐方案起始值，v1 为 1000）；家族临界值低于
 精度时按方案 §17 在执行前提高并锁死次数与种子，不在接近显著时追加。
-失败处理：set_id/role/gene 列缺失、边表无有效行、某集合在图中无节点、
-无 S-T 组合 → 退出 2。
+失败处理：set_id/role/gene 列缺失、边表无有效行、无 S-T 组合、全部组合
+不可估计 → 退出 2；个别集合在图中无节点 → NA 行 + log 记因。
 解释边界：网络邻近是先验/机制相容证据，不是药效验证（§18.2）；
 度数匹配不足时报告不可估计，不降匹配条件、不聚合相邻箱（§17）；
 表达/可检测性匹配不在本节点（plan_network_background 任务范围）。
@@ -56,7 +65,7 @@ measure = { type = "string", default = "closest", doc = "closest | separation" }
 n_random = { type = "int", default = 10000, min = 100.0, doc = "degree-matched randomizations; p=(b+1)/(B+1); default 10000 since v2 (was 1000)" }
 bin_width = { type = "int", default = 10, min = 1.0, doc = "degree bin width for matched sampling" }
 seed = { type = "int", default = 42, doc = "RNG seed" }
-has_header = { type = "string", default = "auto", doc = "edge table header: auto (sniff) | yes | no" }
+has_header = { type = "string", default = "auto", doc = "edge table header: auto (known-token whitelist) | yes | no" }
 
 [nodes.command]
 interpreter = "python3"

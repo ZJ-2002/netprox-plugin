@@ -53,12 +53,20 @@ def closest_golden(dist, members, targets, exclude_self=False):
 
 
 def separation_golden(dist, s_members, t_members):
+    # v3（fix-review R06）：对齐 emreg00/toolbox get_separation（jorg-closest）
+    # ——d12 取两个方向 nearest 距离均值的平均（对称），单基因集合的
+    # 集合内距离以 0 代入（toolbox values=[0]）。v2 金标只有 S→T 单向。
     d_ab = closest_golden(dist, s_members, t_members)
+    d_ba = closest_golden(dist, t_members, s_members)
     d_aa = closest_golden(dist, s_members, s_members, exclude_self=True)
     d_bb = closest_golden(dist, t_members, t_members, exclude_self=True)
-    if d_ab is None or d_aa is None or d_bb is None:
+    if d_ab is None or d_ba is None:
         return None
-    return d_ab - 0.5 * (d_aa + d_bb)
+    if d_aa is None:
+        d_aa = 0.0
+    if d_bb is None:
+        d_bb = 0.0
+    return (d_ab + d_ba) / 2 - 0.5 * (d_aa + d_bb)
 
 
 # 合成小图：hub 中心 + 两条分支（S 与 T 各挂一支）+ 一条孤立二点组件（应被剔除）。
@@ -113,7 +121,7 @@ def test_closest_matches_golden():
     assert mod.closest_distance(graph, S_IN, T_IN) == expected
 
 
-def test_separation_matches_golden_and_singleton_is_none():
+def test_separation_matches_golden_and_symmetric():
     mod = load_module()
     import networkx as nx
 
@@ -124,9 +132,33 @@ def test_separation_matches_golden_and_singleton_is_none():
     expected = separation_golden(GOLDEN_DIST, S_IN, T_IN)
     value, reason = mod.proximity(graph, "separation", S_IN, T_IN)
     assert value == expected and reason is None
-    # 单元素集合：排除自身后集合内距离无定义 → (None, "singleton")，不崩溃。
-    value, reason = mod.proximity(graph, "separation", S_IN, T_SINGLETON)
-    assert value is None and reason == "singleton"
+    # 对称性（fix-review R06）：交换 S/T 集合，separation 不变（v2 单向实现
+    # 会变）。closest 的方向性是其定义性质，不在此约束内。
+    swapped, _ = mod.proximity(graph, "separation", T_IN, S_IN)
+    assert swapped == value
+    # 单元素集合（v3）：toolbox values=[0] 代入集合内距离 → 可估计，
+    # 与独立金标一致（v2 输出 NA）。
+    expected_singleton = separation_golden(GOLDEN_DIST, S_IN, T_SINGLETON)
+    value_singleton, reason_singleton = mod.proximity(
+        graph, "separation", S_IN, T_SINGLETON)
+    assert reason_singleton is None
+    assert value_singleton == expected_singleton
+
+
+def test_separation_path_graph_counterexample_symmetric():
+    # fix-review R06 原始反例：路径图 A–B–C–D–E–F–G–H，S={A,B}、T={B,H}。
+    # v2 单向实现：separation(S,T)=−3.0、separation(T,S)=−0.5（非对称）。
+    # 官方（toolbox jorg-closest）：d_ST=(1+0)/2=0.5、d_TS=(0+6)/2=3.0、
+    # d_SS=1、d_TT=6 → (0.5+3.0)/2−(1+6)/2 = **−1.75**，两向一致。
+    mod = load_module()
+    import networkx as nx
+
+    nodes = list("ABCDEFGH")
+    graph = nx.Graph()
+    graph.add_edges_from(zip(nodes, nodes[1:]))
+    forward, _ = mod.proximity(graph, "separation", ["A", "B"], ["B", "H"])
+    backward, _ = mod.proximity(graph, "separation", ["B", "H"], ["A", "B"])
+    assert forward == -1.75 and backward == -1.75
 
 
 def test_header_sniff_drops_gene_header_row(tmp_path):
@@ -141,6 +173,51 @@ def test_header_sniff_drops_gene_header_row(tmp_path):
     plain.write_text(EDGES_TSV, encoding="utf-8")
     edges, dropped, mode = mod.parse_edges(str(plain), "auto")
     assert dropped is False and mode == "sniffed" and len(edges) == len(GOLDEN_EDGES)
+
+
+def test_header_sniff_keeps_single_symbolic_edge_review_r05(tmp_path):
+    # fix-review R05 原始反例：真实无表头输入仅一条 "A\tB"。v2 启发式
+    # （首行非数字且不出现在其余行端点）→ 误判表头 → 空边集。v3 白名单：
+    # A/B 不是已知表头记号 → 保留为真边。
+    mod = load_module()
+    single = tmp_path / "single.tsv"
+    single.write_text("A\tB\n", encoding="utf-8")
+    edges, dropped, mode = mod.parse_edges(str(single), "auto")
+    assert dropped is False and mode == "sniffed"
+    assert edges == [("A", "B")]
+
+
+def test_header_sniff_keeps_both_disconnected_symbolic_edges_review_r05(tmp_path):
+    # fix-review R05 第二反例：两条互不相连的符号边——v2 会删第一条
+    # （其端点不再出现于其余行）。v3 两条都保留。
+    mod = load_module()
+    two = tmp_path / "two.tsv"
+    two.write_text("GENE1\tGENE2\nGENE3\tGENE4\n", encoding="utf-8")
+    edges, dropped, mode = mod.parse_edges(str(two), "auto")
+    assert dropped is False and mode == "sniffed"
+    assert edges == [("GENE1", "GENE2"), ("GENE3", "GENE4")]
+
+
+def test_header_sniff_whitelist_recognizes_known_headers(tmp_path):
+    # 生态内真实表头（string_ppi 输出 gene_a/gene_b；通用 source/target）
+    # 仍被识别——**小写精确匹配**。大写形式（SOURCE/Gene_A）与白名单词的
+    # 大写基因符号（GENE1/GENE2 是 gene1/gene2 的大写）都不识别：
+    # 大写或非常规表头需 has_header=yes 显式声明。
+    mod = load_module()
+    for header in ("gene_a\tgene_b", "source\ttarget", "node1\tnode2",
+                   "protein1\tprotein2", "from\tto"):
+        path = tmp_path / f"h{abs(hash(header))}.tsv"
+        path.write_text(header + "\nA\tB\n", encoding="utf-8")
+        edges, dropped, mode = mod.parse_edges(str(path), "auto")
+        assert dropped is True and mode == "sniffed", header
+        assert edges == [("A", "B")]
+    for not_header in ("SOURCE\tTARGET", "Gene_A\tGene_B", "GENE1\tGENE2"):
+        path = tmp_path / f"n{abs(hash(not_header))}.tsv"
+        path.write_text(not_header + "\nA\tB\n", encoding="utf-8")
+        edges, dropped, mode = mod.parse_edges(str(path), "auto")
+        assert dropped is False and mode == "sniffed", not_header
+        assert ("A", "B") in edges and (not_header.split("\t")[0],
+                                        not_header.split("\t")[1]) in edges
 
 
 # --- 全流程：子进程跑脚本（与引擎同构：env in / 文件 out）。---
@@ -232,7 +309,9 @@ def test_header_edge_can_hijack_largest_component_v1_failure_mode(tmp_path):
     assert result_no.returncode == 2
 
 
-def test_separation_singleton_outputs_na_row_without_crash(tmp_path):
+def test_separation_singleton_estimable_toolbox_zero(tmp_path):
+    # v3（fix-review R06）：单基因集合按官方 toolbox values=[0] 代入集合内
+    # 距离 → 可估计（v2 输出 NA 行）。数值与独立金标逐位一致。
     sets_singleton = (
         "set_id\trole\tgene\n"
         + "".join(f"SSET\tS\t{g}\n" for g in S_SET)
@@ -247,10 +326,50 @@ def test_separation_singleton_outputs_na_row_without_crash(tmp_path):
     assert len(rows) == 1
     row = rows[0]
     assert row["n_s"] == str(len(S_IN)) and row["n_t"] == "1"
+    expected = separation_golden(GOLDEN_DIST, S_IN, T_SINGLETON)
+    assert expected is not None  # toolbox 0 代入后金标可估
+    assert abs(float(row["d_observed"]) - expected) < 1e-12
+    assert "not estimable" not in out_log.read_text()
+
+
+def test_all_na_still_exits_2_with_evidence_written(tmp_path):
+    # v3（fix-review R06 失败保行）：集合经最大分量过滤后为空 → NA 行 + log
+    # 记因，证据文件照写；但该表没有任何可估组合 → 退出 2（v2 退 2 但无
+    # 行级证据；静默 skip 是被指控的缺陷）。
+    sets_offgraph = "set_id\trole\tgene\nSSET\tS\tS1\nTSET\tT\tISO1\n"
+    out_tsv, out_log, result = run_node(
+        tmp_path, EDGES_TSV, sets_offgraph, expect_ok=False,
+    )
+    assert result.returncode == 2
+    _, rows = read_table(out_tsv)  # 证据文件已写出（失败保行）
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["n_s"] == "1" and row["n_t"] == "0"
     for column in ("d_observed", "d_rand_mean", "d_rand_sd", "mc_se", "z",
                    "p_lower", "p_upper", "n_random_used"):
         assert row[column] in ("NA", "nan", ""), f"{column} should be NA, got {row[column]!r}"
     assert "not estimable" in out_log.read_text()
+    assert "all rows NA" in result.stderr
+
+
+def test_partial_na_keeps_row_and_exits_zero(tmp_path):
+    # v3 混合情形：一个可估组合 + 一个空集合组合 → 退 0，两行都在表里
+    # （空集合组合 NA + log 记因，可估组合正常统计）。
+    sets_mixed = (
+        "set_id\trole\tgene\n"
+        + "".join(f"SSET\tS\t{g}\n" for g in S_SET)
+        + "SOFF\tS\tISO1\n"
+        + "".join(f"TSET\tT\t{g}\n" for g in T_SET)
+    )
+    out_tsv, out_log, result = run_node(tmp_path, EDGES_TSV, sets_mixed)
+    assert result.returncode == 0, result.stderr
+    _, rows = read_table(out_tsv)
+    assert len(rows) == 2
+    by_set = {row["set_s"]: row for row in rows}
+    assert float(by_set["SSET"]["d_observed"]) == closest_golden(GOLDEN_DIST, S_IN, T_IN)
+    assert by_set["SOFF"]["n_s"] == "0"
+    assert by_set["SOFF"]["d_observed"] in ("NA", "nan", "")
+    assert "SOFF vs TSET" in out_log.read_text()
 
 
 def test_separation_normal_pair_matches_golden(tmp_path):
@@ -311,12 +430,3 @@ def test_output_columns_match_manifest_declaration(tmp_path):
     # 声明行里不得再出现未真实输出的列名。
     assert "n_in_component" not in declared_columns
     assert "n_random_used" in declared_columns and "mc_se" in declared_columns
-
-
-def test_empty_after_component_filter_exits(tmp_path):
-    sets_offgraph = "set_id\trole\tgene\nSSET\tS\tS1\nTSET\tT\tISO1\n"
-    _, _, result = run_node(
-        tmp_path, EDGES_TSV, sets_offgraph, expect_ok=False,
-    )
-    # ISO1 在小组件里被分量过滤 → 该组合 skipped；无组合可估 → 退出 2。
-    assert result.returncode == 2

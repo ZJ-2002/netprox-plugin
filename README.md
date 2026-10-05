@@ -29,26 +29,41 @@ netprox/
 
 ## 口径（Guney 2016 语义）
 
-- **表头处理（v2，审计 F12）**：边表首行自动嗅探——两端点列均非数字
-  且不出现在其余任何行的端点集里 → 判为表头丢弃。v1 `header=None`
-  会把 string_ppi 输出的 `gene_a	gene_b` 表头当成一条假边入图。
-  `has_header=yes|no` 显式覆盖（no 时表头行按数据行处理，自负）。
+- **表头处理（v3，fix-review R05）**：auto 模式改为**已知表头记号白名单**
+  ——首行两端点均为白名单记号（`gene_a`/`gene_b`/`source`/`target`/
+  `node1`/`protein1` 等，**小写精确匹配**）才判表头丢弃；白名单外一律当
+  数据行。v2 的"非数字且不出现在其余行端点集"启发式会把只出现一次的
+  真边当表头删掉（单边文件 `A	B` → 空图；两条不相连符号边 → 删
+  第一条）。单字母记号（a/b/u/v）故意不收——真实基因符号存在单字母
+  形式；大写形式（`SOURCE`/`GENE1`）也不识别——大写是真实基因符号的
+  常态，大写或非常规表头请 `has_header=yes` 显式声明。v1 `header=None`
+  会把 string_ppi 输出的表头当假边入图（v2 修复的原始缺陷）。
 - **度匹配随机化**：从同度 bin（`degree // bin_width`）无放回抽样；
   箱内候选不足时如实少抽并计 undermatched（每对集合汇总一次上报），
   **不降条件、不聚合相邻箱**（此处修正 v1 README 的"聚合相邻 bin"
   错误描述——代码从未聚合，聚合会放松度匹配）。经验 P=(b+1)/(B+1)
-  双侧。
-- `closest`：S 中每基因到 T 最近距离的均值；`separation`：
-  d_AB − (d_AA + d_BB)/2，集合内距离**排除自身**（否则 d_AA≡0）。
-- **单元素集合（v2）**：separation 某集合入网节点 <2 时，排除自身后
-  集合内距离无定义 → 该 (S,T) 行输出 NA（全部统计列 NA，n_s/n_t 仍
-  报实际入网数），不崩溃；log 记 "separation not estimable"。
+  双侧。欠匹配抽出的随机集合比请求的小——按偏离冻结零模型对待并
+  WARN，不只当精度损失。
+- `closest`：S 中每基因到 T 最近距离的均值（方向性是 closest 的定义
+  性质，S/T 互换会变）；`separation`（v3，fix-review R06）对齐
+  emreg00/toolbox `get_separation`（jorg-closest）：d12 = 两个方向
+  nearest 距离均值的平均，separation = d12 − (d_AA + d_BB)/2，集合内
+  距离**排除自身**（否则 d_AA≡0），**对称**（v2 只用 S→T 单向，路径图
+  A–B–C–D–E–F–G–H 上 S={A,B}/T={B,H} 得 −3.0，交换得 −0.5；官方
+  两向均为 −1.75）。
+- **单元素集合（v3）**：separation 的集合内距离按 toolbox 以 0 代入
+  （`values=[0]`），单基因集合可估计（v2 曾输出 NA，官方语义可估）。
+- **失败保行（v3）**：组合不可估计（某集合经最大分量过滤后为空等）
+  保留 NA 行（统计列 NA，n_s/n_t 报实际入网数）+ log 记因；v2 曾静默
+  skip 该组合。**全部组合**均不可估计 → 证据文件照写后退 2（节点失败
+  信号不丢）。
 - 只取最大连通分量；不在网络中的基因剔除并记 log（n_s/n_t 列报
   实际入网数）。
 - **输出列契约（v2）**：`n_random_used` = 实际参与统计的随机化次数
   （v1 manifest 声明的 `n_in_component` 从未真实输出，属契约缺口，
   已改为声明实际列并由测试锁定）；`mc_se` = d_rand_sd/√n_random_used
-  （MC 标准误，v2 新增）。log 逐对打印实际 B_used。
+  ——**随机距离均值的 MC 标准误，不是经验 P 的 MC 精度**（v3 措辞
+  对齐）。log 逐对打印实际 B_used。
 - BFS 按目标集合批量发起（每对 |T| 次 BFS，非每基因每目标两次）。
 
 ## 解释边界
@@ -61,11 +76,15 @@ netprox/
 ## 测试（离线，tests/test_network_proximity.py）
 
 - 金标准：合成小图上用**纯 python BFS**（不经 networkx）独立算
-  closest/separation，与脚本函数逐一比对（防实现两侧同错）。
+  closest/separation（v3 金标按官方 toolbox 公式：两向平均 + 单基因
+  集合内距离 0），与脚本函数逐一比对（防实现两侧同错）。
 - 表头两态：同一图有/无表头跑出的 proximity.tsv **逐字节一致**
   （假边不再入图）；`has_header=no` 显式覆盖时表头按数据行入图
   （log 节点数可证）。
-- 单元素 separation → NA 行 + 退出 0 + log 记因；closest 不受影响。
+- v3 反例锁定：单边无表头文件 `A	B` 不再被嗅探删除；两条不相连
+  符号边两条全保留；路径图 S={A,B}/T={B,H} separation 两向对称
+  （= −1.75，v2 得 −3.0/−0.5）；单基因集合可估计；空集合（分量
+  过滤后）→ NA 行保留不跳过。
 - seed 确定性：同 seed 两次运行输出逐字节一致。
 - 契约锁定：输出列 == manifest doc 声明列（tomllib 解析比对）；
   默认 n_random=10000；p ∈ [1/(B+1), 1]。
