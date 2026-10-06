@@ -33,10 +33,12 @@ n_in_component 与实际输出不符，已对齐为实际列。
 measure：
 - closest —— Guney d_c(S,T)：对每个 s 取到 T 的最短距离，取均值
   （方向性是 closest 的定义性质，S/T 互换会变）；
-- separation —— 对齐 emreg00/toolbox get_separation（jorg-closest）：
-  d12 = 两个方向 nearest 距离均值的平均，d_AB - (d_AA + d_BB)/2
-  （d_xx 为集合内 closest 距离，排除自身），对称；单基因集合的 d_xx
-  按 toolbox 以 0 代入（v3：v2 曾输出 NA，官方语义可估计）。
+- separation —— 对齐 emreg00/toolbox get_separation（jorg-closest）
+  原文（v4，2026-10-06 复审修正）：d12 = 两个方向逐节点 nearest 距离
+  合并成一个列表后的整体均值（|S|≠|T| 时 ≠ 两方向均值的等权平均，
+  v3 口径错误），d_AB - (d_AA + d_BB)/2（d_xx 为集合内 closest 距离，
+  排除自身），对称；单基因集合的 d_xx 按 toolbox 以 0 代入（v3：v2 曾
+  输出 NA，官方语义可估计）。
   不可估计的组合（集合经最大分量过滤后为空等）保留 NA 行并 log 记因
   （v3 失败保行：v2 曾静默跳过该组合）；全部组合均不可估计 → 仍退 2
   （证据文件先写出）。

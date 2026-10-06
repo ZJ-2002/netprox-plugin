@@ -21,6 +21,13 @@
 # - separation 对齐官方定义（emreg00/toolbox get_separation, jorg-closest）：
 #   d12 = 两个方向 nearest 距离均值的平均，separation = d12-(d_AA+d_BB)/2，
 #   对称。单基因集合的集合内距离按 toolbox 以 0 代入（不再输出 NA）。
+# v4 契约修正（2026-10-06 复审，v3 对齐口径错了）：
+# - separation 的 d12 不是"两个方向均值的等权平均"，是 toolbox 原文的
+#   pooled 语义：两方向逐节点 nearest 距离 values.extend() 合并成一个
+#   列表后取一次整体均值。|S|≠|T| 时两者不同（反例：路径图 A—B—…—H，
+#   S={A,B}、T={B,E,H}：v3 得 -0.25，toolbox 原文得 0.00）。v3 反例
+#   S={A,B}/T={B,H} 恰好 |S|=|T|，两口径同值 -1.75，不具判别力——
+#   金标当时照抄了插件公式（两侧同错一直绿）。
 # - 失败保行：组合不可估计（集合经分量过滤后为空等）不再静默 skip 或
 #   整体退出 2，输出 NA 行并 log 记因；仅当不存在任何 (S,T) 组合才退出 2。
 # 失败处理：列缺失/无组合 → 退出 2。
@@ -118,10 +125,13 @@ def build_graph(edges):
     return graph, component
 
 
-def closest_distance(graph, from_set, to_set, exclude_self=False):
-    # 对 to_set 每个节点做 BFS，取 from_set 各点到 to_set 的最小距离均值。
+def closest_distance_values(graph, from_set, to_set, exclude_self=False):
+    # 对 to_set 每个节点做 BFS，返回 from_set 各点到 to_set 的 nearest
+    # 距离列表（不可达节点不计入；全部不可达 → None）。返回逐节点值而非
+    # 均值是 v4 的关键：separation 需要 pooled 语义（两方向逐节点值合并后
+    # 取一次整体均值），不能先各自取均值再平均——|S|≠|T| 时两者不同。
     # 集合内距离（d_AA/d_BB）须排除自身，否则每点到自己的 0 会压平 d_AA；
-    # 集合仅 1 个元素时排除自身后无可达目标 → None（separation 不可估计）。
+    # 集合仅 1 个元素时排除自身后无可达目标 → None（toolbox values=[0]）。
     to_set = set(to_set)
     best = {node: None for node in from_set}
     for target in to_set:
@@ -132,9 +142,12 @@ def closest_distance(graph, from_set, to_set, exclude_self=False):
             if node in lengths and (best[node] is None or lengths[node] < best[node]):
                 best[node] = lengths[node]
     reachable = [value for value in best.values() if value is not None]
-    if not reachable:
-        return None
-    return float(np.mean(reachable))
+    return reachable or None
+
+
+def closest_distance(graph, from_set, to_set, exclude_self=False):
+    values = closest_distance_values(graph, from_set, to_set, exclude_self)
+    return None if values is None else float(np.mean(values))
 
 
 def proximity(graph, measure, s_members, t_members):
@@ -142,24 +155,23 @@ def proximity(graph, measure, s_members, t_members):
 
     closest 保持 Guney 的方向性定义（S 中每基因到 T 最近距离的均值，
     S/T 互换会变——这是 closest 本身的性质，不是缺陷）。
-    separation 对齐 emreg00/toolbox get_separation（jorg-closest）：
-    d12 = (mean_{s∈S} min_{t∈T} d + mean_{t∈T} min_{s∈S} d) / 2，对称；
+    separation 对齐 emreg00/toolbox get_separation（jorg-closest）原文
+    （v4 复审修正）：d12 = 两方向逐节点 nearest 距离合并成一个列表后的
+    整体均值（toolbox 先 values.extend(...) 再取一次 mean），对称；
     separation = d12 − (d_SS + d_TT)/2，d_XX 为集合内 nearest 距离均值
     （排除自身）。单基因集合的 d_XX 按 toolbox 以 0 代入（values=[0]）。
     """
-    d_st = closest_distance(graph, s_members, t_members)
-    d_ts = closest_distance(graph, t_members, s_members)
-    if d_st is None or d_ts is None:
+    d_st_values = closest_distance_values(graph, s_members, t_members)
+    d_ts_values = closest_distance_values(graph, t_members, s_members)
+    if d_st_values is None or d_ts_values is None:
         return None, "unreachable"  # 两集合在最大分量内本应连通，防御分支
     if measure == "closest":
-        return d_st, None
-    d_ss = closest_distance(graph, s_members, s_members, exclude_self=True)
-    d_tt = closest_distance(graph, t_members, t_members, exclude_self=True)
-    if d_ss is None:
-        d_ss = 0.0  # 单基因集合：toolbox values=[0] 代入
-    if d_tt is None:
-        d_tt = 0.0
-    d12 = (d_st + d_ts) / 2.0
+        return float(np.mean(d_st_values)), None
+    d_ss_values = closest_distance_values(graph, s_members, s_members, exclude_self=True)
+    d_tt_values = closest_distance_values(graph, t_members, t_members, exclude_self=True)
+    d_ss = float(np.mean(d_ss_values)) if d_ss_values else 0.0  # 单基因集合：toolbox values=[0] 代入
+    d_tt = float(np.mean(d_tt_values)) if d_tt_values else 0.0
+    d12 = float(np.mean(d_st_values + d_ts_values))  # v4：pooled 整体均值
     return d12 - 0.5 * (d_ss + d_tt), None
 
 

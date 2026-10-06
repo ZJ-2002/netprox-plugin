@@ -40,7 +40,9 @@ def all_distances(adjacency):
     return {node: bfs_distances(adjacency, node) for node in adjacency}
 
 
-def closest_golden(dist, members, targets, exclude_self=False):
+def closest_values_golden(dist, members, targets, exclude_self=False):
+    # 逐节点 nearest 距离列表（v4）：separation 金标需要逐节点值做 pooled
+    # 合并，不能只拿方向均值。
     values = []
     for node in members:
         candidates = [
@@ -49,24 +51,34 @@ def closest_golden(dist, members, targets, exclude_self=False):
         ]
         if candidates:
             values.append(min(candidates))
-    return sum(values) / len(values) if values else None
+    return values or None
+
+
+def closest_golden(dist, members, targets, exclude_self=False):
+    values = closest_values_golden(dist, members, targets, exclude_self)
+    return None if values is None else sum(values) / len(values)
 
 
 def separation_golden(dist, s_members, t_members):
-    # v3（fix-review R06）：对齐 emreg00/toolbox get_separation（jorg-closest）
-    # ——d12 取两个方向 nearest 距离均值的平均（对称），单基因集合的
-    # 集合内距离以 0 代入（toolbox values=[0]）。v2 金标只有 S→T 单向。
-    d_ab = closest_golden(dist, s_members, t_members)
-    d_ba = closest_golden(dist, t_members, s_members)
+    # v4（2026-10-06 复审）：对齐 emreg00/toolbox get_separation（jorg-closest）
+    # 原文——两方向逐节点 nearest 距离 values.extend() 合并成一个列表后取
+    # 一次整体均值；单基因集合的集合内距离以 0 代入（values=[0]）。
+    # v3 金标的错误：把插件的"两方向均值等权平均"公式照抄进金标（两侧
+    # 同错一直绿）；且 v3 反例 |S|=|T| 恰不判别。本金标独立镜像作者代码
+    # 路径（逐节点值 pooled）。
+    d_st = closest_values_golden(dist, s_members, t_members)
+    d_ts = closest_values_golden(dist, t_members, s_members)
+    if d_st is None or d_ts is None:
+        return None
+    pooled = d_st + d_ts
+    d12 = sum(pooled) / len(pooled)
     d_aa = closest_golden(dist, s_members, s_members, exclude_self=True)
     d_bb = closest_golden(dist, t_members, t_members, exclude_self=True)
-    if d_ab is None or d_ba is None:
-        return None
     if d_aa is None:
         d_aa = 0.0
     if d_bb is None:
         d_bb = 0.0
-    return (d_ab + d_ba) / 2 - 0.5 * (d_aa + d_bb)
+    return d12 - 0.5 * (d_aa + d_bb)
 
 
 # 合成小图：hub 中心 + 两条分支（S 与 T 各挂一支）+ 一条孤立二点组件（应被剔除）。
@@ -137,19 +149,24 @@ def test_separation_matches_golden_and_symmetric():
     swapped, _ = mod.proximity(graph, "separation", T_IN, S_IN)
     assert swapped == value
     # 单元素集合（v3）：toolbox values=[0] 代入集合内距离 → 可估计，
-    # 与独立金标一致（v2 输出 NA）。
+    # 与独立金标一致（v2 输出 NA）。|S|=3≠|T|=1，同时锁定 v4 pooled 口径
+    # 的硬数值：pooled=[3,3,4,3] → d12=3.25，d_SS=1、d_TT=0 → 2.75
+    # （v3 均值等权平均口径得 2.6667——此断言在 v3 代码上必挂）。
     expected_singleton = separation_golden(GOLDEN_DIST, S_IN, T_SINGLETON)
     value_singleton, reason_singleton = mod.proximity(
         graph, "separation", S_IN, T_SINGLETON)
     assert reason_singleton is None
     assert value_singleton == expected_singleton
+    assert value_singleton == 2.75
 
 
 def test_separation_path_graph_counterexample_symmetric():
     # fix-review R06 原始反例：路径图 A–B–C–D–E–F–G–H，S={A,B}、T={B,H}。
     # v2 单向实现：separation(S,T)=−3.0、separation(T,S)=−0.5（非对称）。
-    # 官方（toolbox jorg-closest）：d_ST=(1+0)/2=0.5、d_TS=(0+6)/2=3.0、
-    # d_SS=1、d_TT=6 → (0.5+3.0)/2−(1+6)/2 = **−1.75**，两向一致。
+    # 官方（toolbox jorg-closest）：pooled=[1,0,0,6] → d12=7/4、d_SS=1、
+    # d_TT=6 → 7/4−7/2 = **−1.75**，两向一致。注意：本例 |S|=|T|=2，
+    # pooled 与"两方向均值等权平均"同值——只判别 v2 的单向缺陷，
+    # 判别 v3 口径错误的是下面的不等大小反例。
     mod = load_module()
     import networkx as nx
 
@@ -159,6 +176,23 @@ def test_separation_path_graph_counterexample_symmetric():
     forward, _ = mod.proximity(graph, "separation", ["A", "B"], ["B", "H"])
     backward, _ = mod.proximity(graph, "separation", ["B", "H"], ["A", "B"])
     assert forward == -1.75 and backward == -1.75
+
+
+def test_separation_pooled_counterexample_unequal_sizes():
+    # 2026-10-06 复审反例（判别性）：路径图 A–B–C–D–E–F–G–H，
+    # S={A,B}（|S|=2）、T={B,E,H}（|T|=3）。逐节点 nearest：
+    # S→T=[1,0]、T→S=[0,3,6]。toolbox 原文 pooled=[1,0,0,3,6] →
+    # d12=10/5=2.0，d_SS=1、d_TT=3 → separation=0.00。
+    # v3 的均值等权平均：(0.5+3)/2=1.75 → separation=−0.25（错）。
+    mod = load_module()
+    import networkx as nx
+
+    nodes = list("ABCDEFGH")
+    graph = nx.Graph()
+    graph.add_edges_from(zip(nodes, nodes[1:]))
+    forward, _ = mod.proximity(graph, "separation", ["A", "B"], ["B", "E", "H"])
+    backward, _ = mod.proximity(graph, "separation", ["B", "E", "H"], ["A", "B"])
+    assert forward == 0.0 and backward == 0.0
 
 
 def test_header_sniff_drops_gene_header_row(tmp_path):

@@ -45,12 +45,15 @@ netprox/
   双侧。欠匹配抽出的随机集合比请求的小——按偏离冻结零模型对待并
   WARN，不只当精度损失。
 - `closest`：S 中每基因到 T 最近距离的均值（方向性是 closest 的定义
-  性质，S/T 互换会变）；`separation`（v3，fix-review R06）对齐
-  emreg00/toolbox `get_separation`（jorg-closest）：d12 = 两个方向
-  nearest 距离均值的平均，separation = d12 − (d_AA + d_BB)/2，集合内
-  距离**排除自身**（否则 d_AA≡0），**对称**（v2 只用 S→T 单向，路径图
-  A–B–C–D–E–F–G–H 上 S={A,B}/T={B,H} 得 −3.0，交换得 −0.5；官方
-  两向均为 −1.75）。
+  性质，S/T 互换会变）；`separation`（v4，2026-10-06 复审修正）对齐
+  emreg00/toolbox `get_separation`（jorg-closest）**原文**：d12 = 两个
+  方向**逐节点** nearest 距离合并成一个列表后的**整体均值**（toolbox 先
+  `values.extend(...)` 再取一次 mean），separation = d12 − (d_AA +
+  d_BB)/2，集合内距离**排除自身**（否则 d_AA≡0），**对称**。v3 曾错写成
+  "两方向均值的等权平均"——|S|≠|T| 时两者不同（判别性反例：路径图
+  A–B–C–D–E–F–G–H 上 S={A,B}/T={B,E,H}，v3 得 −0.25，toolbox 原文得
+  0.00；v3 的反例 S={A,B}/T={B,H} 恰好 |S|=|T|，两口径同值 −1.75，
+  不具判别力，v2 单向实现则得 −3.0/−0.5）。
 - **单元素集合（v3）**：separation 的集合内距离按 toolbox 以 0 代入
   （`values=[0]`），单基因集合可估计（v2 曾输出 NA，官方语义可估）。
 - **失败保行（v3）**：组合不可估计（某集合经最大分量过滤后为空等）
@@ -76,14 +79,17 @@ netprox/
 ## 测试（离线，tests/test_network_proximity.py）
 
 - 金标准：合成小图上用**纯 python BFS**（不经 networkx）独立算
-  closest/separation（v3 金标按官方 toolbox 公式：两向平均 + 单基因
-  集合内距离 0），与脚本函数逐一比对（防实现两侧同错）。
+  closest/separation（v4 金标镜像 toolbox 作者代码路径：两方向逐节点
+  值 pooled + 单基因集合内距离 0；v3 金标照抄了插件公式，两侧同错
+  一直绿），与脚本函数逐一比对，并用硬数值断言锁口径。
 - 表头两态：同一图有/无表头跑出的 proximity.tsv **逐字节一致**
   （假边不再入图）；`has_header=no` 显式覆盖时表头按数据行入图
   （log 节点数可证）。
-- v3 反例锁定：单边无表头文件 `A	B` 不再被嗅探删除；两条不相连
+- 反例锁定：单边无表头文件 `A	B` 不再被嗅探删除；两条不相连
   符号边两条全保留；路径图 S={A,B}/T={B,H} separation 两向对称
-  （= −1.75，v2 得 −3.0/−0.5）；单基因集合可估计；空集合（分量
+  （= −1.75，v2 得 −3.0/−0.5）；**v4 判别性反例** S={A,B}/T={B,E,H}
+  （|S|≠|T|）separation = 0.00（v3 错口径得 −0.25，此断言在 v3 代码
+  上必挂）；单基因集合可估计（pooled 口径硬数值 2.75）；空集合（分量
   过滤后）→ NA 行保留不跳过。
 - seed 确定性：同 seed 两次运行输出逐字节一致。
 - 契约锁定：输出列 == manifest doc 声明列（tomllib 解析比对）；
@@ -91,6 +97,8 @@ netprox/
 
 ## 冒烟记录
 
-稠密模块拓扑：近距对 d=1.75（经 hub ≤2 如设计）、远距对 z=+39.8
-（P 下限 0.004975）；closest 与 separation 排序一致；度匹配随机
-均值/SD 合理。
+（v3 代码记录，2026-10-05。）稠密模块拓扑：近距对 d=1.75（经 hub ≤2
+如设计；此为 closest 值，v4 未动 closest）、远距对 z=+39.8（P 下限
+0.004975）；closest 与 separation 排序一致；度匹配随机均值/SD 合理。
+v4 只改 separation 在 |S|≠|T| 时的数值口径（向 toolbox 原文对齐），
+seed 固定下 separation 的 z/p 需以 v4 重跑为准。
